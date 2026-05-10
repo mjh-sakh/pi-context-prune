@@ -139,7 +139,7 @@ The extension registers the `/pruner` command:
 | `/pruner settings` | Opens an interactive settings overlay |
 | `/pruner on` | Enable pruning |
 | `/pruner off` | Disable pruning |
-| `/pruner status` | Show enabled state, summarizer model, thinking level, prune trigger, batching mode, notices, and cumulative stats |
+| `/pruner status` | Show enabled state, summarizer model, thinking level, prune trigger, batching mode, min raw threshold, notices, and cumulative stats |
 | `/pruner model` | Show current summarizer model |
 | `/pruner model <id>` | Set summarizer model (e.g. `anthropic/claude-haiku-3-5`) |
 | `/pruner model <id>:<thinking>` | Set summarizer model and thinking together (e.g. `openai/gpt-5-mini:low`) |
@@ -156,7 +156,7 @@ The extension registers the `/pruner` command:
 
 ### Settings overlay
 
-`/pruner settings` opens a TUI overlay with eight interactive items:
+`/pruner settings` opens a TUI overlay with nine interactive items:
 
 1. **Enabled** — toggle pruning on/off
 2. **Prune status line** — show or hide the footer status widget and queued turn notifications
@@ -164,8 +164,9 @@ The extension registers the `/pruner` command:
 4. **Prune trigger** — cycle through all five `pruneOn` modes
 5. **Summarizer model** — press Enter to open a searchable submenu listing `"default"` plus all available models
 6. **Summarizer thinking** — cycle through the thinking/reasoning level used for summarizer calls
-7. **Remind unpruned count** — toggle the agentic-auto `<pruner-note>` reminder
-8. **Batching mode** — switch between per-turn and per-agent-message summaries
+7. **Min raw chars to prune** — choose `Disabled (0)`, `Default (700)`, or `Large (1000)`
+8. **Remind unpruned count** — toggle the agentic-auto `<pruner-note>` reminder
+9. **Batching mode** — switch between per-turn and per-agent-message summaries
 
 All changes are saved immediately to `~/.pi/agent/context-prune/settings.json` and reflected in the footer status widget when it is enabled.
 
@@ -190,6 +191,7 @@ When the model calls `context_prune`:
 - All pending tool-call batches are summarized together (parallel one-call-per-batch by default, or sequentially in `/pruner now` so the progress widget can show live per-batch updates)
 - While the tool is running, compact live progress is streamed into the tool output box above the input (for example `Context prune running… batch 2/4 · 1.2k chars received`)
 - If the summary is smaller than the raw tool-result text it would replace, the original outputs are pruned from future context and a summary message is injected as a steer
+- If the batch's raw tool-result text is below the configured minimum prune threshold, pruning is skipped quietly for that attempted range before the summarizer runs: the original tool results remain in context, and the prune frontier still advances
 - If the summary is larger than the raw tool-result text, pruning is skipped for that attempted range: the original tool results remain in context, but the prune frontier still advances so the next prune attempt starts after that range instead of retrying it forever
 
 The tool is guided by a system prompt that instructs the model to use it after completing a meaningful batch of work (not after every trivial call).
@@ -206,7 +208,9 @@ Config is stored in `~/.pi/agent/context-prune/settings.json` (global, project-i
   "summarizerModel": "default",
   "summarizerThinking": "default",
   "pruneOn": "agentic-auto",
+  "minRawCharsToPrune": 700,
   "remindUnprunedCount": true,
+  "notifySkipped": true,
   "batchingMode": "agent-message"
 }
 ```
@@ -218,6 +222,7 @@ Config is stored in `~/.pi/agent/context-prune/settings.json` (global, project-i
 | `showStartupNotice` | `true` / `false` | `true` |
 | `summarizerModel` | `"default"` or `"provider/model-id"` | `"default"` |
 | `summarizerThinking` | `"default"`, `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` | `"default"` |
+| `minRawCharsToPrune` | `0`, `700`, `1000` | `700` |
 | `pruneOn` | `"every-turn"`, `"on-context-tag"`, `"on-demand"`, `"agent-message"`, `"agentic-auto"` | `"agentic-auto"` |
 | `remindUnprunedCount` | `true` / `false` | `true` |
 | `notifySkipped` | `true` / `false` | `true` |
@@ -225,6 +230,7 @@ Config is stored in `~/.pi/agent/context-prune/settings.json` (global, project-i
 
 - `showPruneStatusLine: true` keeps the prune footer widget and the automatic queued-turn notice visible. Turn it off if you want pruning to stay active without that extra status noise.
 - `showStartupNotice: true` shows the passive `pruner loaded — pruning ON/OFF | model: ...` info notice when a session starts. Turn it off if you want startup to stay quiet; manual command output and real errors still appear.
+- `minRawCharsToPrune: 700` skips obviously tiny batches before the summarizer runs. Set it to `0` to disable the guard, or `1000` to prune only larger raw tool-output batches.
 - `remindUnprunedCount: true` appends a small ephemeral `<pruner-note>` to the last tool result before each LLM call to remind the model of the number of unpruned tool calls in context. This only has an effect when `pruneOn` is set to `"agentic-auto"`.
 - `notifySkipped: false` silences the "skipped pruning" warning shown when a summary would be larger than the raw tool output it replaces (pruning is skipped in that case; only the notification is suppressed).
 - `batchingMode: "turn"` keeps one summary per assistant tool-using turn. This is mainly useful for debugging or closely inspecting prune behavior. `batchingMode: "agent-message"` is the default and recommended setting because it merges all assistant turns between two user messages into one summary.
