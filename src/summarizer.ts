@@ -210,31 +210,42 @@ export async function summarizeBatches(
   if (batches.length === 0) return [];
   // Single batch — delegate to the single-batch path (no extra overhead)
   if (batches.length === 1) {
-    return [
-      await summarizeBatch(batches[0], config, ctx, {
-        signal: options.signal,
-        onUsage: (response) => options.onUsage?.(batches[0], response),
-        onTextProgress: (receivedChars) => {
-          options.onBatchTextProgress?.(0, 1, batches[0], receivedChars);
-        },
-      }),
-    ];
+    const result = await summarizeBatch(batches[0], config, ctx, {
+      signal: options.signal,
+      onUsage: (response) => options.onUsage?.(batches[0], response),
+      onTextProgress: (receivedChars) => {
+        options.onBatchTextProgress?.(0, 1, batches[0], receivedChars);
+      },
+    });
+    options.onBatchComplete?.(0, 1, batches[0], result);
+    return [result];
   }
 
-  // Wait for every in-flight call even on abort, so final usage callbacks and
-  // stats persistence cannot race with flushPending's finally block.
-  const settled = await Promise.allSettled(
-    batches.map((batch, index) =>
-      summarizeBatch(batch, config, ctx, {
+  // Bound parallel calls while preserving input order and upstream usage hooks.
+  const results: Array<SummarizeResult | null> = new Array(batches.length).fill(null);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < batches.length) {
+      if (options.signal?.aborted) throw new Error("summarizeBatches: aborted before next batch");
+      const index = nextIndex++;
+      const batch = batches[index];
+      const result = await summarizeBatch(batch, config, ctx, {
         signal: options.signal,
         onUsage: (response) => options.onUsage?.(batch, response),
         onTextProgress: (receivedChars) => {
           options.onBatchTextProgress?.(index, batches.length, batch, receivedChars);
         },
-      })
-    )
-  );
+      });
+      results[index] = result;
+      options.onBatchComplete?.(index, batches.length, batch, result);
+    }
+  };
+
+  const workerCount = Math.min(config.summarizerConcurrency, batches.length);
+  // Drain every active worker before flushPending persists stats or resets UI.
+  const settled = await Promise.allSettled(Array.from({ length: workerCount }, () => worker()));
   const failure = settled.find((result) => result.status === "rejected");
   if (failure?.status === "rejected") throw failure.reason;
-  return settled.map((result) => result.status === "fulfilled" ? result.value : null);
+  return results;
 }
