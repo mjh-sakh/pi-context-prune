@@ -66,6 +66,15 @@ export function resolveModel(config: ContextPruneConfig, ctx: ExtensionContext):
   return found;
 }
 
+function nowMs(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+
+function formatMs(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+}
+
 function receivedTextChars(message: AssistantMessage): number {
   return message.content.reduce((sum, content) => {
     return content.type === "text" ? sum + content.text.length : sum;
@@ -86,21 +95,32 @@ export async function summarizeBatch(
   if (options.signal?.aborted) throw new Error("summarizeBatch: aborted before start");
 
   try {
-    const model = resolveModel(config, ctx);
+    const batchLabel = `batch turn ${batch.turnIndex}`;
+    const startedAt = nowMs();
+    options.onProfile?.(`${batchLabel}: summarize start`, `${batch.toolCalls.length} tool calls`);
 
+    const resolveStartedAt = nowMs();
+    const model = resolveModel(config, ctx);
+    options.onProfile?.(`${batchLabel}: resolve model`, formatMs(nowMs() - resolveStartedAt));
+
+    const authStartedAt = nowMs();
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    options.onProfile?.(`${batchLabel}: auth`, formatMs(nowMs() - authStartedAt));
     if (!auth.ok) {
       const authMessage = "error" in auth ? auth.error : "authentication failed";
       ctx.ui.notify(`pruner: summarization failed: ${authMessage}`, "error");
       return null;
     }
 
+    const serializeStartedAt = nowMs();
     const serialized = serializeBatchForSummarizer(batch);
     const userMessage =
       SYSTEM_PROMPT + "\n\n<tool-call-batch>\n" + serialized + "\n</tool-call-batch>";
+    options.onProfile?.(`${batchLabel}: serialize`, `${formatMs(nowMs() - serializeStartedAt)} · ${serialized.length} chars`);
 
     // Pass the abort signal so the underlying fetch is cancelled immediately
     // when the user presses Esc while the tool is running.
+    const streamCreateStartedAt = nowMs();
     const responseStream = stream(
       model,
       {
@@ -114,8 +134,11 @@ export async function summarizeBatch(
       },
       { apiKey: auth.apiKey, headers: auth.headers, signal: options.signal, ...summarizerThinkingOptions(config) }
     );
+    options.onProfile?.(`${batchLabel}: stream created`, formatMs(nowMs() - streamCreateStartedAt));
 
     let lastReportedChars = -1;
+    let sawFirstText = false;
+    const streamStartedAt = nowMs();
     options.onTextProgress?.(0);
     const reportTextProgress = (message: AssistantMessage) => {
       const chars = receivedTextChars(message);
@@ -129,15 +152,22 @@ export async function summarizeBatch(
       // Belt-and-suspenders: break early when signal fires mid-stream.
       if (options.signal?.aborted) break;
       if (event.type === "text_start" || event.type === "text_delta" || event.type === "text_end") {
+        if (!sawFirstText) {
+          sawFirstText = true;
+          options.onProfile?.(`${batchLabel}: first text event`, formatMs(nowMs() - streamStartedAt));
+        }
         reportTextProgress(event.partial);
       }
     }
+    options.onProfile?.(`${batchLabel}: stream iteration`, `${formatMs(nowMs() - streamStartedAt)} · first text ${sawFirstText ? "yes" : "no"}`);
 
     // If signal fired while we were iterating, propagate the abort so
     // flushPending can detect it and restore batches.
     if (options.signal?.aborted) throw new Error("summarizeBatch: aborted during stream");
 
+    const resultStartedAt = nowMs();
     const response = await responseStream.result();
+    options.onProfile?.(`${batchLabel}: stream result`, formatMs(nowMs() - resultStartedAt));
     reportTextProgress(response);
     // stopReason "aborted" means the provider cut the stream short (e.g. signal
     // fired just before the final chunk). Treat identically to the signal check
@@ -154,6 +184,7 @@ export async function summarizeBatch(
       .map((c: any) => c.text)
       .join("\n");
 
+    options.onProfile?.(`${batchLabel}: summarize done`, `${formatMs(nowMs() - startedAt)} · ${llmText.length} summary chars`);
     return {
       summaryText: llmText,
       usage: response.usage,
@@ -190,10 +221,12 @@ export async function summarizeBatches(
   options: SummarizeBatchesOptions = {}
 ): Promise<Array<SummarizeResult | null>> {
   if (batches.length === 0) return [];
+  options.onProfile?.("summarizeBatches start", `${batches.length} batches · concurrency ${config.summarizerConcurrency}`);
   // Single batch — delegate to the single-batch path (no extra overhead)
   if (batches.length === 1) {
     const result = await summarizeBatch(batches[0], config, ctx, {
       signal: options.signal,
+      onProfile: (label, details) => options.onProfile?.(`batch 1/1: ${label}`, details),
       onTextProgress: (receivedChars) => {
         options.onBatchTextProgress?.(0, 1, batches[0], receivedChars);
       },
@@ -212,18 +245,22 @@ export async function summarizeBatches(
       if (options.signal?.aborted) throw new Error("summarizeBatches: aborted before next batch");
       const index = nextIndex++;
       const batch = batches[index];
+      options.onProfile?.(`worker batch ${index + 1}/${batches.length}: start`, `${batch.toolCalls.length} tool calls`);
       const result = await summarizeBatch(batch, config, ctx, {
         signal: options.signal,
+        onProfile: (label, details) => options.onProfile?.(`batch ${index + 1}/${batches.length}: ${label}`, details),
         onTextProgress: (receivedChars) => {
           options.onBatchTextProgress?.(index, batches.length, batch, receivedChars);
         },
       });
       results[index] = result;
+      options.onProfile?.(`worker batch ${index + 1}/${batches.length}: complete`, result ? "ok" : "null result");
       options.onBatchComplete?.(index, batches.length, batch, result);
     }
   };
 
   const workerCount = Math.min(config.summarizerConcurrency, batches.length);
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  options.onProfile?.("summarizeBatches done", `${batches.length} batches`);
   return results;
 }

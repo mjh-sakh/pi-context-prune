@@ -37,6 +37,7 @@ import {
 import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
+import { createPruneProfiler } from "./src/profiler.js";
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
@@ -208,6 +209,12 @@ export default function (pi: ExtensionAPI) {
     const appendSummaryMessage = (content: string, details: unknown) =>
       sessionManager!.appendCustomMessageEntry(CUSTOM_TYPE_SUMMARY, content, true, details);
 
+    const profiler = createPruneProfiler("context-prune-flush");
+    profiler.mark(
+      "flush start",
+      `${batches.length} batches · ${batches.reduce((sum, batch) => sum + batch.toolCalls.length, 0)} tool calls · concurrency ${currentConfig.value.summarizerConcurrency}`,
+    );
+
     try {
       setPruneStatusWidget(ctx, currentConfig.value, "prune: summarizing…");
       let completedBatchCount = 0;
@@ -239,6 +246,7 @@ export default function (pi: ExtensionAPI) {
       const eligibleIndexes = batches
         .map((batch, index) => (shouldSkipTooSmall(batch) ? -1 : index))
         .filter((index) => index >= 0);
+      profiler.mark("classified batches", `${eligibleIndexes.length} eligible · ${batches.length - eligibleIndexes.length} too small`);
 
       // Summarize eligible batches. When onProgress is provided (i.e. /pruner now
       // with the multi-row overlay) we process sequentially so each row can be
@@ -252,13 +260,16 @@ export default function (pi: ExtensionAPI) {
             continue;
           }
           options.onProgress(i, batches.length, batches[i], "start");
+          profiler.mark(`sequential batch ${i + 1}/${batches.length}: start`, `${batches[i].toolCalls.length} tool calls`);
           const r = await summarizeBatch(batches[i], currentConfig.value, ctx, {
             signal: options.signal,
+            onProfile: (label, details) => profiler.mark(label, details),
             onTextProgress: (receivedChars) => {
               reportBatchTextProgress(i, batches.length, batches[i], receivedChars);
             },
           });
           outcomes[i] = r ? { kind: "summarized", result: r } : { kind: "failed" };
+          profiler.mark(`sequential batch ${i + 1}/${batches.length}: complete`, r ? "ok" : "null result");
           options.onProgress(i, batches.length, batches[i], r ? "done" : "skipped");
           markBatchCompleted();
         }
@@ -267,6 +278,7 @@ export default function (pi: ExtensionAPI) {
         setWorkingProgress();
         const eligibleBatches = eligibleIndexes.map((index) => batches[index]);
         const results = await summarizeBatches(eligibleBatches, currentConfig.value, ctx, {
+          onProfile: (label, details) => profiler.mark(label, details),
           onBatchTextProgress: (eligibleIndex, _total, batch, receivedChars) => {
             const originalIndex = eligibleIndexes[eligibleIndex] ?? eligibleIndex;
             reportBatchTextProgress(originalIndex, batches.length, batch, receivedChars);
@@ -285,6 +297,8 @@ export default function (pi: ExtensionAPI) {
         completedBatchCount = batches.length;
         setWorkingProgress();
       }
+
+      profiler.mark("summarization stage complete");
 
       // Process outcomes in order; stop at first failed summarizer call.
       // Batches before the first failure are persisted or marked skipped;
@@ -400,6 +414,7 @@ export default function (pi: ExtensionAPI) {
       };
 
       try {
+        profiler.mark("persistence/frontier start", `${processedBatches.length} processed batches`);
         if (delivery === "runtime") {
           frontier.advance(frontierSnapshot);
           frontier.persist(pi);
@@ -413,11 +428,16 @@ export default function (pi: ExtensionAPI) {
             // Ignore stats persistence failures; the prune result and frontier are the contract.
           }
         }
+        profiler.mark("persistence/frontier done");
       } catch (err) {
         return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
       }
 
       setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
+
+      const profileSummary = profiler.summary();
+      console.info(`[context-prune-flush] summary\n${profileSummary}`);
+      safeNotify(ctx, `pruner profile:\n${profileSummary}`);
 
       // Notify about any oversized batches that were skipped
       for (const batch of oversizedBatches) {
@@ -449,6 +469,8 @@ export default function (pi: ExtensionAPI) {
         summaryCharCount: totalSummaryCharCount,
       };
     } catch (err) {
+      profiler.mark("flush error", errorMessage(err));
+      console.info(`[context-prune-flush] summary\n${profiler.summary()}`);
       restoreBatches(batches);
       // When the abort signal fired, summarizeBatch rethrows rather than
       // swallowing the error.  Don't show a UI error — the user intended this.

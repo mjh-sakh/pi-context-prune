@@ -388,6 +388,8 @@ export interface FlushOptions {
 export interface SummarizeBatchOptions {
   /** Receives the number of summary text characters streamed so far. */
   onTextProgress?: (receivedChars: number) => void;
+  /** Temporary profiling hook for timing summarizer phases. */
+  onProfile?: (label: string, details?: string) => void;
   /**
    * Abort signal — when fired the in-flight stream call is cancelled and the
    * batch is treated as aborted (not a summarizer failure).
@@ -399,6 +401,8 @@ export interface SummarizeBatchOptions {
 export interface SummarizeBatchesOptions {
   /** Receives streamed summary text character counts for each batch. */
   onBatchTextProgress?: BatchTextProgressCallback;
+  /** Temporary profiling hook for timing summarizer phases. */
+  onProfile?: (label: string, details?: string) => void;
   /** Invoked when one batch's summarizer call has finished (success or failed/null). */
   onBatchComplete?: (index: number, total: number, batch: CapturedBatch, result: SummarizeResult | null) => void;
   /**
