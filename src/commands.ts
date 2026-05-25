@@ -7,6 +7,7 @@ import {
   BATCHING_MODES,
   STATUS_WIDGET_ID,
   PROGRESS_WIDGET_ID,
+  SUMMARIZER_CONCURRENCY_LEVELS,
   SUMMARIZER_THINKING_LEVELS,
 } from "./types.js";
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
@@ -73,9 +74,10 @@ const SUBCOMMANDS = [
   { value: "settings", label: "settings  — interactive settings overlay" },
   { value: "on",       label: "on        — enable context pruning" },
   { value: "off",      label: "off       — disable context pruning" },
-  { value: "status",  label: "status    — show status, model, thinking, prune trigger, threshold, and status line" },
+  { value: "status",  label: "status    — show status, model, thinking, concurrency, prune trigger, threshold, and status line" },
   { value: "model",   label: "model     — show or set the summarizer model" },
   { value: "thinking", label: "thinking  — show or set the summarizer thinking level" },
+  { value: "concurrency", label: "concurrency — show or set summarizer concurrency (1 / 4 / 7)" },
   { value: "prune-on", label: "prune-on  — show or set the trigger mode" },
   { value: "batching", label: "batching  — show or set the batching mode (turn / agent-message)" },
   { value: "stats",   label: "stats     — show cumulative summarizer token/cost stats" },
@@ -104,6 +106,16 @@ function pruneModeLabel(mode: ContextPruneConfig["pruneOn"]): string {
 
 function summarizerThinkingLabel(level: ContextPruneConfig["summarizerThinking"]): string {
   return SUMMARIZER_THINKING_LEVELS.find((entry) => entry.value === level)?.label ?? level;
+}
+
+function summarizerConcurrencyLabel(value: ContextPruneConfig["summarizerConcurrency"]): string {
+  return SUMMARIZER_CONCURRENCY_LEVELS.find((entry) => entry.value === value)?.label ?? String(value);
+}
+
+function summarizerConcurrencyDescription(value: ContextPruneConfig["summarizerConcurrency"]): string {
+  if (value === 1) return "Run one summarizer request at a time. Safest for provider limits; slowest for many batches.";
+  if (value === 4) return "Run up to four summarizer requests at a time. Default balanced option.";
+  return "Run up to seven summarizer requests at a time. Faster, but applies more pressure to provider limits.";
 }
 
 function summarizerThinkingDescription(level: ContextPruneConfig["summarizerThinking"]): string {
@@ -196,6 +208,8 @@ Usage:
   /pruner model <id>:<thinking>            Set summarizer model and thinking together (e.g. openai/gpt-5-mini:low)
   /pruner thinking                         Show the current summarizer thinking level
   /pruner thinking <level>                 Set summarizer thinking: default, off, minimal, low, medium, high, xhigh
+  /pruner concurrency                      Show the current summarizer concurrency
+  /pruner concurrency <1|4|7>              Set max concurrent summarizer requests
   /pruner prune-on                         Show or interactively pick the trigger
   /pruner prune-on every-turn              Summarize after every tool-calling turn (debugging only; worst for prompt cache churn)
   /pruner prune-on on-context-tag          Summarize when context_tag is called (requires pi-context extension)
@@ -221,6 +235,11 @@ Batching mode:
   - turn (default): each assistant turn that used tools gets its own summary block. Small, granular.
   - agent-message: all assistant turns between two consecutive user messages are merged into one summary.
     Use this when a single user request triggers many back-to-back tool rounds that belong together.
+
+Summarizer concurrency:
+  - 1: safest/sequential; use when providers rate-limit or pruning gets stuck.
+  - 4: default/balanced.
+  - 7: faster for many batches, with higher provider pressure.
 
 Minimum raw-size guard:
   - Disabled (0): do not pre-skip small batches; let the existing oversized-summary check decide after summarization.
@@ -469,6 +488,13 @@ export function registerCommands(
               description: summarizerThinkingDescription(config.summarizerThinking),
             },
             {
+              id: "summarizerConcurrency",
+              label: "Summarizer concurrency",
+              values: SUMMARIZER_CONCURRENCY_LEVELS.map((level) => String(level.value)),
+              currentValue: String(config.summarizerConcurrency),
+              description: summarizerConcurrencyDescription(config.summarizerConcurrency),
+            },
+            {
               id: "minRawCharsToPrune",
               label: "Min raw chars to prune",
               values: MIN_RAW_CHARS_PRESETS.map((preset) => String(preset.value)),
@@ -521,6 +547,12 @@ export function registerCommands(
               const thinkingItem = items.find((item) => item.id === "summarizerThinking");
               if (thinkingItem) {
                 thinkingItem.description = summarizerThinkingDescription(newConfig.summarizerThinking);
+              }
+            } else if (id === "summarizerConcurrency") {
+              newConfig.summarizerConcurrency = Number(newValue) as ContextPruneConfig["summarizerConcurrency"];
+              const concurrencyItem = items.find((item) => item.id === "summarizerConcurrency");
+              if (concurrencyItem) {
+                concurrencyItem.description = summarizerConcurrencyDescription(newConfig.summarizerConcurrency);
               }
             } else if (id === "minRawCharsToPrune") {
               newConfig.minRawCharsToPrune = Number(newValue);
@@ -608,7 +640,7 @@ export function registerCommands(
             ? `\n  --- summarizer ---\n  calls:       ${s.callCount}\n  input:       ${formatTokens(s.totalInputTokens)} tokens\n  output:      ${formatTokens(s.totalOutputTokens)} tokens\n  cost:        ${formatCost(s.totalCost)}`
             : "\n  (no summarizer calls yet)";
           ctx.ui.notify(
-            `pruner status:\n  enabled:   ${cfg.enabled}\n  model:     ${cfg.summarizerModel}\n  thinking:  ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  trigger:   ${mode}\n  batching:  ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  min raw:   ${minRawCharsPresetLabel(cfg.minRawCharsToPrune)} (${cfg.minRawCharsToPrune})\n  status:    ${cfg.showPruneStatusLine ? "on" : "off"}\n  remind:    ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
+            `pruner status:\n  enabled:   ${cfg.enabled}\n  model:     ${cfg.summarizerModel}\n  thinking:  ${summarizerThinkingLabel(cfg.summarizerThinking)} (${cfg.summarizerThinking})\n  concurr.:  ${cfg.summarizerConcurrency} (${summarizerConcurrencyLabel(cfg.summarizerConcurrency)})\n  trigger:   ${mode}\n  batching:  ${batchingModeLabel(cfg.batchingMode)} (${cfg.batchingMode})\n  min raw:   ${minRawCharsPresetLabel(cfg.minRawCharsToPrune)} (${cfg.minRawCharsToPrune})\n  status:    ${cfg.showPruneStatusLine ? "on" : "off"}\n  remind:    ${cfg.remindUnprunedCount ? "on" : "off"} (agentic-auto only)${statsLine}`,
           );
           break;
         }
@@ -695,6 +727,31 @@ export function registerCommands(
           }
           saveConfig(currentConfig.value);
           ctx.ui.notify(`Summarizer thinking set to: ${currentConfig.value.summarizerThinking}`);
+          break;
+        }
+
+        // ── /pruner concurrency [value] ──
+        case "concurrency": {
+          const concurrencyArg = subArgs[0];
+          if (!concurrencyArg) {
+            const current = currentConfig.value.summarizerConcurrency;
+            ctx.ui.notify(`Current summarizer concurrency: ${current} (${summarizerConcurrencyLabel(current)})`);
+            return;
+          }
+          const parsed = Number(concurrencyArg);
+          if (SUMMARIZER_CONCURRENCY_LEVELS.some((level) => level.value === parsed)) {
+            currentConfig.value = {
+              ...currentConfig.value,
+              summarizerConcurrency: parsed as ContextPruneConfig["summarizerConcurrency"],
+            };
+          } else {
+            ctx.ui.notify("Invalid summarizer concurrency: use one of 1, 4, 7.", "warning");
+            return;
+          }
+          saveConfig(currentConfig.value);
+          ctx.ui.notify(
+            `Summarizer concurrency set to: ${currentConfig.value.summarizerConcurrency} (${summarizerConcurrencyLabel(currentConfig.value.summarizerConcurrency)})`,
+          );
           break;
         }
 

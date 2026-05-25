@@ -1,8 +1,14 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
-import type { ContextPruneConfig, PruneOn, SummarizerThinking } from "./types.js";
-import { DEFAULT_CONFIG, MIN_RAW_CHARS_TO_PRUNE_PRESETS, PRUNE_ON_MODES, SUMMARIZER_THINKING_LEVELS } from "./types.js";
+import type { ContextPruneConfig, PruneOn, SummarizerConcurrency, SummarizerThinking } from "./types.js";
+import {
+  DEFAULT_CONFIG,
+  MIN_RAW_CHARS_TO_PRUNE_PRESETS,
+  PRUNE_ON_MODES,
+  SUMMARIZER_CONCURRENCY_LEVELS,
+  SUMMARIZER_THINKING_LEVELS,
+} from "./types.js";
 
 /** Path to the extension's own settings file, independent of any project. */
 export const SETTINGS_PATH = join(homedir(), ".pi", "agent", "context-prune", "settings.json");
@@ -23,6 +29,16 @@ function normalizeMinRawCharsToPrune(value: unknown): number {
     : DEFAULT_CONFIG.minRawCharsToPrune;
 }
 
+function normalizeSummarizerConcurrency(value: unknown): SummarizerConcurrency {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_CONFIG.summarizerConcurrency;
+  const rounded = Math.round(value);
+  const allowed = SUMMARIZER_CONCURRENCY_LEVELS.map((level) => level.value);
+  if (allowed.includes(rounded as SummarizerConcurrency)) return rounded as SummarizerConcurrency;
+  return allowed.reduce((nearest, current) =>
+    Math.abs(current - rounded) < Math.abs(nearest - rounded) ? current : nearest
+  );
+}
+
 /** Reads ~/.pi/agent/context-prune/settings.json and returns the config (or defaults). */
 export async function loadConfig(): Promise<ContextPruneConfig> {
   try {
@@ -41,6 +57,7 @@ export async function loadConfig(): Promise<ContextPruneConfig> {
       summarizerThinking: isSummarizerThinking(merged.summarizerThinking)
         ? merged.summarizerThinking
         : DEFAULT_CONFIG.summarizerThinking,
+      summarizerConcurrency: normalizeSummarizerConcurrency(merged.summarizerConcurrency),
       remindUnprunedCount:
         typeof merged.remindUnprunedCount === "boolean"
           ? merged.remindUnprunedCount
