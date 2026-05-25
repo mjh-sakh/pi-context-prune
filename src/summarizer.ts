@@ -192,25 +192,38 @@ export async function summarizeBatches(
   if (batches.length === 0) return [];
   // Single batch — delegate to the single-batch path (no extra overhead)
   if (batches.length === 1) {
-    return [
-      await summarizeBatch(batches[0], config, ctx, {
-        signal: options.signal,
-        onTextProgress: (receivedChars) => {
-          options.onBatchTextProgress?.(0, 1, batches[0], receivedChars);
-        },
-      }),
-    ];
+    const result = await summarizeBatch(batches[0], config, ctx, {
+      signal: options.signal,
+      onTextProgress: (receivedChars) => {
+        options.onBatchTextProgress?.(0, 1, batches[0], receivedChars);
+      },
+    });
+    options.onBatchComplete?.(0, 1, batches[0], result);
+    return [result];
   }
 
-  // Multiple batches — run in parallel; each produces its own SummarizeResult
-  return Promise.all(
-    batches.map((batch, index) =>
-      summarizeBatch(batch, config, ctx, {
+  // Multiple batches — run with the configured concurrency limit; each produces
+  // its own SummarizeResult while preserving input order in the returned array.
+  const results: Array<SummarizeResult | null> = new Array(batches.length).fill(null);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < batches.length) {
+      if (options.signal?.aborted) throw new Error("summarizeBatches: aborted before next batch");
+      const index = nextIndex++;
+      const batch = batches[index];
+      const result = await summarizeBatch(batch, config, ctx, {
         signal: options.signal,
         onTextProgress: (receivedChars) => {
           options.onBatchTextProgress?.(index, batches.length, batch, receivedChars);
         },
-      })
-    )
-  );
+      });
+      results[index] = result;
+      options.onBatchComplete?.(index, batches.length, batch, result);
+    }
+  };
+
+  const workerCount = Math.min(config.summarizerConcurrency, batches.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return results;
 }

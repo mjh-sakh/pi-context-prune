@@ -127,7 +127,17 @@ export type BatchingMode = "turn" | "agent-message";
 /** Thinking/reasoning level requested for summarizer LLM calls. */
 export type SummarizerThinking = "default" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
-/** Choices for the summarizer thinking setting (used by commands and settings overlay) */
+/** Allowed concurrency levels for summarizer LLM calls. */
+export type SummarizerConcurrency = 1 | 4 | 7;
+
+/** Choices for the summarizer concurrency setting (used by commands and settings overlay) */
+export const SUMMARIZER_CONCURRENCY_LEVELS: { value: SummarizerConcurrency; label: string }[] = [
+  { value: 1, label: "Safe / sequential" },
+  { value: 4, label: "Balanced" },
+  { value: 7, label: "Fast" },
+];
+
+/** Choices for the minimum raw-size guard setting (used by commands and settings overlay) */
 export const MIN_RAW_CHARS_TO_PRUNE_PRESETS = [0, 700, 1000] as const;
 
 export const SUMMARIZER_THINKING_LEVELS: { value: SummarizerThinking; label: string }[] = [
@@ -169,6 +179,8 @@ export interface ContextPruneConfig {
   summarizerModel: string;
   /** Thinking/reasoning level to request for summarizer calls. */
   summarizerThinking: SummarizerThinking;
+  /** Maximum number of summarizer LLM calls to run at once. */
+  summarizerConcurrency: SummarizerConcurrency;
   /** When to trigger summarization and pruning */
   pruneOn: PruneOn;
   /**
@@ -198,6 +210,7 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   showPruneStatusLine: true,
   summarizerModel: "default",
   summarizerThinking: "default",
+  summarizerConcurrency: 4,
   pruneOn: "agent-message",
   minRawCharsToPrune: 700,
   remindUnprunedCount: true,
@@ -396,6 +409,8 @@ export interface SummarizeBatchOptions {
 export interface SummarizeBatchesOptions {
   /** Receives streamed summary text character counts for each batch. */
   onBatchTextProgress?: BatchTextProgressCallback;
+  /** Invoked when one batch's summarizer call has finished (success or failed/null). */
+  onBatchComplete?: (index: number, total: number, batch: CapturedBatch, result: SummarizeResult | null) => void;
   /**
    * Abort signal forwarded to every individual summarizeBatch() call.
    * When fired, all in-flight stream calls are cancelled.

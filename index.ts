@@ -33,6 +33,7 @@ import {
   CUSTOM_TYPE_INDEX,
   CUSTOM_TYPE_STATS,
   CUSTOM_TYPE_FRONTIER,
+  BATCHING_MODES,
 } from "./src/types.js";
 import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
@@ -72,6 +73,20 @@ export default function (pi: ExtensionAPI) {
   const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
   const batchRawCharCount = (batch: CapturedBatch) => batch.toolCalls.reduce((sum, tc) => sum + tc.resultText.length, 0);
+
+  const batchingModeLabel = (config: ContextPruneConfig) =>
+    BATCHING_MODES.find((mode) => mode.value === config.batchingMode)?.label ?? config.batchingMode;
+
+  const workingStatusText = (completed: number, total: number, config: ContextPruneConfig) =>
+    `Context prune: ${completed}/${total} batches completed (${batchingModeLabel(config)})`;
+
+  const safeSetWorkingMessage = (ctx: any, message?: string) => {
+    try {
+      ctx.ui.setWorkingMessage?.(message);
+    } catch (err) {
+      if (!isStaleContextError(err)) throw err;
+    }
+  };
 
   const safeNotify = (ctx: any, message: string, type: "info" | "warning" | "error" = "info") => {
     try {
@@ -196,6 +211,15 @@ export default function (pi: ExtensionAPI) {
 
     try {
       setPruneStatusWidget(ctx, currentConfig.value, "prune: summarizing…");
+      let completedBatchCount = 0;
+      const setWorkingProgress = () => {
+        safeSetWorkingMessage(ctx, workingStatusText(completedBatchCount, batches.length, currentConfig.value));
+      };
+      const markBatchCompleted = () => {
+        completedBatchCount = Math.min(batches.length, completedBatchCount + 1);
+        setWorkingProgress();
+      };
+      setWorkingProgress();
 
       const reportBatchTextProgress = (index: number, total: number, batch: CapturedBatch, receivedChars: number) => {
         options.onBatchTextProgress?.(index, total, batch, receivedChars);
@@ -225,6 +249,7 @@ export default function (pi: ExtensionAPI) {
         for (let i = 0; i < batches.length; i++) {
           if (outcomes[i]?.kind === "too-small") {
             options.onProgress(i, batches.length, batches[i], "skipped");
+            markBatchCompleted();
             continue;
           }
           options.onProgress(i, batches.length, batches[i], "start");
@@ -236,13 +261,19 @@ export default function (pi: ExtensionAPI) {
           });
           outcomes[i] = r ? { kind: "summarized", result: r } : { kind: "failed" };
           options.onProgress(i, batches.length, batches[i], r ? "done" : "skipped");
+          markBatchCompleted();
         }
       } else if (eligibleIndexes.length > 0) {
+        completedBatchCount = batches.length - eligibleIndexes.length;
+        setWorkingProgress();
         const eligibleBatches = eligibleIndexes.map((index) => batches[index]);
         const results = await summarizeBatches(eligibleBatches, currentConfig.value, ctx, {
           onBatchTextProgress: (eligibleIndex, _total, batch, receivedChars) => {
             const originalIndex = eligibleIndexes[eligibleIndex] ?? eligibleIndex;
             reportBatchTextProgress(originalIndex, batches.length, batch, receivedChars);
+          },
+          onBatchComplete: () => {
+            markBatchCompleted();
           },
           signal: options.signal,
         });
@@ -251,6 +282,9 @@ export default function (pi: ExtensionAPI) {
           const result = results[i];
           outcomes[originalIndex] = result ? { kind: "summarized", result } : { kind: "failed" };
         }
+      } else {
+        completedBatchCount = batches.length;
+        setWorkingProgress();
       }
 
       // Process outcomes in order; stop at first failed summarizer call.
@@ -431,6 +465,7 @@ export default function (pi: ExtensionAPI) {
       safeNotify(ctx, `pruner: summarization failed: ${errorMessage(err)}`, "error");
       return { ok: false, reason: "failed", error: errorMessage(err) };
     } finally {
+      safeSetWorkingMessage(ctx);
       isFlushing = false;
     }
   };
