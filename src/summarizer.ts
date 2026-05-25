@@ -75,6 +75,24 @@ function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
 }
 
+const FIRST_TOKEN_TIMEOUT_MS = 10_000;
+
+function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
+  const liveSignals = signals.filter((signal): signal is AbortSignal => !!signal);
+  if (liveSignals.length === 0) return undefined;
+
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  for (const signal of liveSignals) {
+    if (signal.aborted) {
+      abort();
+      break;
+    }
+    signal.addEventListener("abort", abort, { once: true });
+  }
+  return controller.signal;
+}
+
 function receivedTextChars(message: AssistantMessage): number {
   return message.content.reduce((sum, content) => {
     return content.type === "text" ? sum + content.text.length : sum;
@@ -119,7 +137,11 @@ export async function summarizeBatch(
     options.onProfile?.(`${batchLabel}: serialize`, `${formatMs(nowMs() - serializeStartedAt)} · ${serialized.length} chars`);
 
     // Pass the abort signal so the underlying fetch is cancelled immediately
-    // when the user presses Esc while the tool is running.
+    // when the user presses Esc while the tool is running. A separate first-token
+    // timeout prevents one provider stall from blocking the whole prune queue.
+    const firstTokenTimeout = new AbortController();
+    const firstTokenTimer = setTimeout(() => firstTokenTimeout.abort(), FIRST_TOKEN_TIMEOUT_MS);
+    const streamSignal = combineAbortSignals(options.signal, firstTokenTimeout.signal);
     const streamCreateStartedAt = nowMs();
     const responseStream = stream(
       model,
@@ -132,7 +154,7 @@ export async function summarizeBatch(
           },
         ],
       },
-      { apiKey: auth.apiKey, headers: auth.headers, signal: options.signal, ...summarizerThinkingOptions(config) }
+      { apiKey: auth.apiKey, headers: auth.headers, signal: streamSignal, ...summarizerThinkingOptions(config) }
     );
     options.onProfile?.(`${batchLabel}: stream created`, formatMs(nowMs() - streamCreateStartedAt));
 
@@ -154,16 +176,23 @@ export async function summarizeBatch(
       if (event.type === "text_start" || event.type === "text_delta" || event.type === "text_end") {
         if (!sawFirstText) {
           sawFirstText = true;
+          clearTimeout(firstTokenTimer);
           options.onProfile?.(`${batchLabel}: first text event`, formatMs(nowMs() - streamStartedAt));
         }
         reportTextProgress(event.partial);
       }
     }
+    clearTimeout(firstTokenTimer);
     options.onProfile?.(`${batchLabel}: stream iteration`, `${formatMs(nowMs() - streamStartedAt)} · first text ${sawFirstText ? "yes" : "no"}`);
 
-    // If signal fired while we were iterating, propagate the abort so
-    // flushPending can detect it and restore batches.
+    // If the caller's signal fired while we were iterating, propagate the abort
+    // so flushPending can detect it and restore batches. If only the first-token
+    // timeout fired, skip this batch and let the queue continue.
     if (options.signal?.aborted) throw new Error("summarizeBatch: aborted during stream");
+    if (!sawFirstText && firstTokenTimeout.signal.aborted) {
+      options.onProfile?.(`${batchLabel}: first token timeout`, `${FIRST_TOKEN_TIMEOUT_MS}ms`);
+      return null;
+    }
 
     const resultStartedAt = nowMs();
     const response = await responseStream.result();
@@ -190,9 +219,15 @@ export async function summarizeBatch(
       usage: response.usage,
     };
   } catch (err: any) {
-    // Propagate abort errors upward so flushPending can check signal.aborted
-    // and return { ok: false, reason: "aborted" } without showing a UI error.
+    // Propagate caller aborts upward so flushPending can return { reason:
+    // "aborted" }. First-token timeouts are local skips so the queue can move on.
     if (options.signal?.aborted) throw err;
+    const isFirstTokenTimeout = err?.name === "AbortError" || err?.message?.includes?.("abort");
+    if (isFirstTokenTimeout) {
+      options.onProfile?.(`batch turn ${batch.turnIndex}: first token timeout`, `${FIRST_TOKEN_TIMEOUT_MS}ms`);
+      ctx.ui.notify(`pruner: summarization skipped after ${FIRST_TOKEN_TIMEOUT_MS / 1000}s without first token`, "warning");
+      return null;
+    }
     ctx.ui.notify(
       `pruner: summarization failed: ${err.message}`,
       "error"
