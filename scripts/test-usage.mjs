@@ -26,7 +26,7 @@ const usage = { input: 12, output: 4, cacheRead: 2, cacheWrite: 0, totalTokens: 
 const batch = (id = 'a') => ({ turnIndex: 3, timestamp: 0, assistantText: '', toolCalls: [{ toolCallId: id, toolName: 'bash', args: {}, resultText: 'x', isError: false }] });
 const response = (stopReason = 'stop') => ({ role: 'assistant', provider: 'anthropic', model: 'test-model', responseModel: 'actual-model',
   content: [{ type: 'text', text: 'much longer than x' }], stopReason, usage });
-const config = { summarizerModel: 'default', summarizerThinking: 'default' };
+const config = { summarizerModel: 'default', summarizerThinking: 'default', summarizerConcurrency: 4 };
 function context(responses) {
   let index = 0;
   const errors = [];

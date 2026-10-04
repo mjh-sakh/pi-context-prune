@@ -874,7 +874,9 @@ export function registerCommands(
 
           if (result.reason === "skipped-too-small" || result.reason === "skipped") {
             ctx.ui.notify(
-              `pruner: skipped ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} from ${result.batchCount} batch${result.batchCount === 1 ? "" : "es"} — raw tool-result text stayed below the configured minimum (${currentConfig.value.minRawCharsToPrune} chars), so the original results were kept and the frontier advanced`,
+              result.reason === "skipped-too-small"
+                ? `pruner: skipped ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} from ${result.batchCount} batch${result.batchCount === 1 ? "" : "es"} — raw tool-result text stayed below the configured minimum (${currentConfig.value.minRawCharsToPrune} chars), so the original results were kept and the frontier advanced`
+                : `pruner: skipped ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"} — batches were below the minimum or their summaries exceeded the raw results; original results were kept and the frontier advanced`,
               "info"
             );
             break;

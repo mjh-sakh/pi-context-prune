@@ -107,7 +107,9 @@ export function registerContextPruneTool(
             content: [
               {
                 type: "text",
-                text: `Context prune skipped ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"}: the raw tool-result text stayed below the configured minimum prune threshold, so the original results were kept and the prune frontier advanced past this range.`,
+                text: result.reason === "skipped-too-small"
+                  ? `Context prune skipped ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"}: the raw tool-result text stayed below the configured minimum prune threshold, so the original results were kept and the prune frontier advanced past this range.`
+                  : `Context prune skipped ${result.toolCallCount} tool call${result.toolCallCount === 1 ? "" : "s"}: batches were below the minimum prune threshold or their summaries exceeded the raw results. The original results were kept and the prune frontier advanced past this range.`,
               },
             ],
             details: result,

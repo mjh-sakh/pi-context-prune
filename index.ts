@@ -279,8 +279,8 @@ export default function (pi: ExtensionAPI) {
 
       // Summarize eligible batches. When onProgress is provided (i.e. /pruner now
       // with the multi-row overlay) we process sequentially so each row can be
-      // checked off as its LLM call completes. Otherwise all eligible batches run
-      // in parallel. Undersized batches are skipped before any LLM call.
+      // checked off as its LLM call completes. Otherwise eligible batches run
+      // with bounded concurrency. Undersized batches are skipped before any LLM call.
       if (options.onProgress) {
         for (let i = 0; i < batches.length; i++) {
           if (outcomes[i]?.kind === "too-small") {
@@ -333,6 +333,7 @@ export default function (pi: ExtensionAPI) {
       let totalSummaryCharCount = 0;
       let totalToolCallCount = 0;
       const oversizedBatches: CapturedBatch[] = [];
+      const oversizedSummaryLengths = new Map<CapturedBatch, number>();
       const tooSmallBatches: CapturedBatch[] = [];
       let firstFailureIndex = -1;
       let persistedSummaryCount = 0;
@@ -385,6 +386,7 @@ export default function (pi: ExtensionAPI) {
             persistedSummaryCount += 1;
           } else {
             oversizedBatches.push(batch);
+            oversizedSummaryLengths.set(batch, summaryText.length);
           }
         } catch (err) {
           // Persistence error mid-loop: stop here, restore this and remaining batches.
@@ -456,10 +458,7 @@ export default function (pi: ExtensionAPI) {
       if (currentConfig.value.notifySkipped) {
         for (const batch of oversizedBatches) {
           const batchRaw = batchRawCharCount(batch);
-          const batchOutcome = outcomes[batches.indexOf(batch)];
-          const batchSummaryLen = batchOutcome?.kind === "summarized"
-            ? wrapSummaryForContext(batchOutcome.result.summaryText + formatSummaryToolCallRefs(indexer.allocateSummaryRefs(batch))).length
-            : 0;
+          const batchSummaryLen = oversizedSummaryLengths.get(batch) ?? 0;
           safeNotify(
             ctx,
             `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — summary was ${batchSummaryLen} chars vs ${batchRaw} raw chars; frontier advanced past this range`,
